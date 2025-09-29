@@ -134,6 +134,13 @@ st.markdown("""
         border: 2px dashed #dee2e6;
         margin: 1rem 0;
     }
+    .warning-box {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -383,38 +390,41 @@ def get_file_download_link(df, filename, text):
     href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
     return href
 
-def process_uploaded_files(uploaded_files, base_output_dir):
-    """Process uploaded Excel files"""
+def process_uploaded_files(uploaded_files, base_output_dir, custom_date=None):
+    """Process uploaded Excel files with custom date input"""
     processed_files = []
     created_folders = set()
     
     for uploaded_file in uploaded_files:
         try:
-            # Extract date from filename or use current date
-            file_date = datetime.now()
-            filename_lower = uploaded_file.name.lower()
-            
-            # Try to extract date from filename
-            date_patterns = [
-                r'(\d{4}-\d{2}-\d{2})',
-                r'(\d{4}\.\d{2}\.\d{2})',
-                r'(\d{8})'
-            ]
-            
-            for pattern in date_patterns:
-                match = re.search(pattern, uploaded_file.name)
-                if match:
-                    date_str = match.group(1)
-                    try:
-                        if len(date_str) == 8:  # YYYYMMDD
-                            file_date = datetime.strptime(date_str, '%Y%m%d')
-                        elif '.' in date_str:  # YYYY.MM.DD
-                            file_date = datetime.strptime(date_str, '%Y.%m.%d')
-                        else:  # YYYY-MM-DD
-                            file_date = datetime.strptime(date_str, '%Y-%m-%d')
-                        break
-                    except ValueError:
-                        continue
+            # Use custom date if provided, otherwise extract from filename or use today
+            if custom_date:
+                file_date = custom_date
+            else:
+                file_date = datetime.now()
+                filename_lower = uploaded_file.name.lower()
+                
+                # Try to extract date from filename
+                date_patterns = [
+                    r'(\d{4}-\d{2}-\d{2})',
+                    r'(\d{4}\.\d{2}\.\d{2})',
+                    r'(\d{8})'
+                ]
+                
+                for pattern in date_patterns:
+                    match = re.search(pattern, uploaded_file.name)
+                    if match:
+                        date_str = match.group(1)
+                        try:
+                            if len(date_str) == 8:  # YYYYMMDD
+                                file_date = datetime.strptime(date_str, '%Y%m%d')
+                            elif '.' in date_str:  # YYYY.MM.DD
+                                file_date = datetime.strptime(date_str, '%Y.%m.%d')
+                            else:  # YYYY-MM-DD
+                                file_date = datetime.strptime(date_str, '%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
             
             # Read the Excel file
             excel_file = pd.ExcelFile(uploaded_file)
@@ -533,7 +543,7 @@ def main():
     input_folder = st.sidebar.text_input(
         "FPK Folder Path:",
         value=st.session_state.get('input_folder', saved_paths.get('input_folder', '')),
-        placeholder="C:/path/to/your/FPK/folder or ./data/input",
+        placeholder="C:/Users/YourName/fpk/Benchmarking",
         key="input_path",
         label_visibility="collapsed"
     )
@@ -542,7 +552,7 @@ def main():
     output_folder = st.sidebar.text_input(
         "Output Folder Path:",
         value=st.session_state.get('output_folder', saved_paths.get('output_folder', '')),
-        placeholder="C:/path/to/output/folder or ./data/output",
+        placeholder="C:/Users/YourName/csvfolder",
         key="output_path",
         label_visibility="collapsed"
     )
@@ -610,13 +620,36 @@ def main():
         st.markdown("### 📤 Uploaded Files Processing")
         st.markdown(f"**Files uploaded:** {len(uploaded_files)}")
         
+        # Show uploaded files
+        for i, uploaded_file in enumerate(uploaded_files):
+            st.write(f"{i+1}. {uploaded_file.name}")
+        
+        # Date input for single file upload
+        custom_date = None
+        if len(uploaded_files) == 1:
+            st.markdown("### 📅 Select Date for File")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                date_input = st.date_input(
+                    "Select the date for this file:",
+                    value=datetime.now(),
+                    help="Choose the date that should be used in the processed CSV files"
+                )
+            with col2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("📅 Use Today", width='stretch'):
+                    date_input = datetime.now().date()
+            
+            custom_date = datetime.combine(date_input, datetime.min.time())
+            st.info(f"📅 Selected date: {custom_date.strftime('%Y-%m-%d')}")
+        
         # Create a temporary output directory for uploaded files
         upload_output_dir = os.path.join(st.session_state.output_folder if st.session_state.get('output_folder') else "./upload_output", "uploaded_files")
         os.makedirs(upload_output_dir, exist_ok=True)
         
         if st.button("🚀 Process Uploaded Files", type="primary", width='stretch'):
             with st.spinner("Processing uploaded files..."):
-                processed_files, created_folders = process_uploaded_files(uploaded_files, upload_output_dir)
+                processed_files, created_folders = process_uploaded_files(uploaded_files, upload_output_dir, custom_date)
             
             # Display results
             success_count = len([f for f in processed_files if f['status'] == 'success'])
@@ -648,7 +681,18 @@ def main():
     
     # Main content area - Folder Processing
     if not st.session_state.get('input_folder'):
-        st.info("👈 Please enter an input folder path or upload files directly")
+        st.markdown('''
+        <div class="warning-box">
+            <h3>⚠️ Please enter folder paths first</h3>
+            <p>Use the sidebar to enter your Google Trends data folder path and output folder path before processing.</p>
+            <p><strong>Example paths:</strong></p>
+            <ul>
+                <li><strong>Data Folder:</strong> C:/Users/YourName/fpk/Benchmarking</li>
+                <li><strong>Output Folder:</strong> C:/Users/YourName/csvfolder</li>
+            </ul>
+        </div>
+        ''', unsafe_allow_html=True)
+        
         st.markdown("""
         ### Expected Folder Structure:
         ```
@@ -669,6 +713,7 @@ def main():
         
         2. **Option 2 - Direct Upload:**
            - Use the file uploader in the sidebar to upload Excel files directly
+           - For single files, you can select a specific date
            - Files will be processed immediately
            - Download links will be provided for processed CSV files
         
