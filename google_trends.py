@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import os
 import glob
-import tkinter as tk
-from tkinter import filedialog
 
 # Set page config
 st.set_page_config(
@@ -79,41 +77,34 @@ if 'processed_data' not in st.session_state:
 # Main title
 st.markdown('<h1 class="main-header">📊 Google Trends Data Processor</h1>', unsafe_allow_html=True)
 
-# Folder selection functions
-def select_folder(title, key):
-    """Function to select folder using tkinter"""
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-    root.wm_attributes('-topmost', 1)  # Bring to front
-    folder_path = filedialog.askdirectory(title=title)
-    root.destroy()
-    return folder_path
-
 # Sidebar for folder selection
 with st.sidebar:
     st.markdown('<h2 class="sub-header">🗂️ Folder Selection</h2>', unsafe_allow_html=True)
     
-    # Upload folder selection
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.text_input("Google Trends Data Folder:", value=st.session_state.base_path, key="base_path_display", disabled=True)
-    with col2:
-        if st.button("📁 Browse", key="select_base"):
-            selected_path = select_folder("Select Google Trends Data Folder", "base_path")
-            if selected_path:
-                st.session_state.base_path = selected_path
-                st.rerun()
+    # Google Trends Data Folder input
+    st.text_input(
+        "Google Trends Data Folder:",
+        value=st.session_state.base_path,
+        key="base_path_input",
+        placeholder="Enter path to Google Trends data folder...",
+        help="Path to the folder containing Web and Youtube subfolders with Google Trends data"
+    )
     
-    # Output folder selection
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.text_input("Output Folder:", value=st.session_state.output_path, key="output_path_display", disabled=True)
-    with col2:
-        if st.button("💾 Browse", key="select_output"):
-            selected_path = select_folder("Select Output Folder", "output_path")
-            if selected_path:
-                st.session_state.output_path = selected_path
-                st.rerun()
+    # Output Folder input
+    st.text_input(
+        "Output Folder:",
+        value=st.session_state.output_path,
+        key="output_path_input",
+        placeholder="Enter path for output files...",
+        help="Path where processed CSV files will be saved"
+    )
+    
+    # Update session state when inputs change
+    if st.session_state.base_path_input != st.session_state.base_path:
+        st.session_state.base_path = st.session_state.base_path_input
+    
+    if st.session_state.output_path_input != st.session_state.output_path:
+        st.session_state.output_path = st.session_state.output_path_input
     
     st.markdown("---")
     
@@ -219,67 +210,94 @@ def process_geomap_data(base_path):
 if not st.session_state.base_path or not st.session_state.output_path:
     st.markdown('''
     <div class="warning-box">
-        <h3>⚠️ Please select folders first</h3>
-        <p>Use the sidebar to select your Google Trends data folder and output folder before processing.</p>
+        <h3>⚠️ Please enter folder paths first</h3>
+        <p>Use the sidebar to enter your Google Trends data folder path and output folder path before processing.</p>
+        <p><strong>Example paths:</strong></p>
+        <ul>
+            <li><strong>Google Trends Data Folder:</strong> C:/Users/YourName/GoogleTrendsData</li>
+            <li><strong>Output Folder:</strong> C:/Users/YourName/ProcessedResults</li>
+        </ul>
     </div>
     ''', unsafe_allow_html=True)
 else:
-    st.markdown(f'<div class="success-box"><strong>📂 Data Folder:</strong> {st.session_state.base_path}</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="success-box"><strong>💾 Output Folder:</strong> {st.session_state.output_path}</div>', unsafe_allow_html=True)
+    # Validate paths exist
+    base_path_exists = os.path.exists(st.session_state.base_path)
+    output_path_exists = os.path.exists(st.session_state.output_path)
+    
+    if base_path_exists:
+        st.markdown(f'<div class="success-box"><strong>📂 Data Folder:</strong> {st.session_state.base_path}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="error-box"><strong>❌ Data Folder Not Found:</strong> {st.session_state.base_path}</div>', unsafe_allow_html=True)
+    
+    if output_path_exists:
+        st.markdown(f'<div class="success-box"><strong>💾 Output Folder:</strong> {st.session_state.output_path}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="warning-box"><strong>⚠️ Output Folder Not Found:</strong> {st.session_state.output_path}</div>', unsafe_allow_html=True)
+        st.info("The output folder will be created automatically when you save files.")
 
 # Process timeline data
 if process_timeline and st.session_state.base_path and st.session_state.output_path:
-    with st.spinner("Processing timeline data..."):
-        timeline_results, timeline_error = process_timeline_data(st.session_state.base_path)
-        
-        if timeline_error:
-            st.error(f"Error processing timeline data: {timeline_error}")
-        elif timeline_results and 'merged' in timeline_results:
-            st.session_state.processed_data['timeline'] = timeline_results['merged']
-            st.success("✅ Timeline data processed successfully!")
+    if not os.path.exists(st.session_state.base_path):
+        st.error("❌ Google Trends data folder path does not exist. Please check the path and try again.")
+    else:
+        with st.spinner("Processing timeline data..."):
+            timeline_results, timeline_error = process_timeline_data(st.session_state.base_path)
             
-            # Display summary
-            df_merged = timeline_results['merged']
-            st.write("**Data Summary:**")
-            st.write(f"- Total rows: {df_merged.shape[0]}")
-            st.write(f"- Columns: {df_merged.shape[1]}")
-            st.write("- Platform distribution:")
-            st.write(df_merged['Platform'].value_counts())
-            
-            # Show preview
-            st.write("**Data Preview:**")
-            st.dataframe(df_merged.head(), use_container_width=True)
+            if timeline_error:
+                st.error(f"Error processing timeline data: {timeline_error}")
+            elif timeline_results and 'merged' in timeline_results:
+                st.session_state.processed_data['timeline'] = timeline_results['merged']
+                st.success("✅ Timeline data processed successfully!")
+                
+                # Display summary
+                df_merged = timeline_results['merged']
+                st.write("**Data Summary:**")
+                st.write(f"- Total rows: {df_merged.shape[0]}")
+                st.write(f"- Columns: {df_merged.shape[1]}")
+                st.write("- Platform distribution:")
+                st.write(df_merged['Platform'].value_counts())
+                
+                # Show preview
+                st.write("**Data Preview:**")
+                st.dataframe(df_merged.head(), use_container_width=True)
+            else:
+                st.error("No timeline data found. Please check that your Google Trends data folder contains the expected CSV files.")
 
 # Process geomap data
 if process_geomap and st.session_state.base_path and st.session_state.output_path:
-    with st.spinner("Processing geomap data..."):
-        geomap_results, geomap_error = process_geomap_data(st.session_state.base_path)
-        
-        if geomap_error:
-            st.error(f"Error processing geomap data: {geomap_error}")
-        elif geomap_results:
-            st.session_state.processed_data.update(geomap_results)
-            st.success("✅ GeoMap data processed successfully!")
+    if not os.path.exists(st.session_state.base_path):
+        st.error("❌ Google Trends data folder path does not exist. Please check the path and try again.")
+    else:
+        with st.spinner("Processing geomap data..."):
+            geomap_results, geomap_error = process_geomap_data(st.session_state.base_path)
             
-            # Display summary for city data
-            if 'city' in geomap_results:
-                st.write("**City Data Summary:**")
-                df_city = geomap_results['city']
-                st.write(f"- Total rows: {df_city.shape[0]}")
-                st.write(f"- Columns: {df_city.shape[1]}")
-                st.write("- Platform distribution:")
-                st.write(df_city['Platform'].value_counts())
-                st.dataframe(df_city.head(), use_container_width=True)
-            
-            # Display summary for region data
-            if 'region' in geomap_results:
-                st.write("**Region Data Summary:**")
-                df_region = geomap_results['region']
-                st.write(f"- Total rows: {df_region.shape[0]}")
-                st.write(f"- Columns: {df_region.shape[1]}")
-                st.write("- Platform distribution:")
-                st.write(df_region['Platform'].value_counts())
-                st.dataframe(df_region.head(), use_container_width=True)
+            if geomap_error:
+                st.error(f"Error processing geomap data: {geomap_error}")
+            elif geomap_results:
+                st.session_state.processed_data.update(geomap_results)
+                st.success("✅ GeoMap data processed successfully!")
+                
+                # Display summary for city data
+                if 'city' in geomap_results:
+                    st.write("**City Data Summary:**")
+                    df_city = geomap_results['city']
+                    st.write(f"- Total rows: {df_city.shape[0]}")
+                    st.write(f"- Columns: {df_city.shape[1]}")
+                    st.write("- Platform distribution:")
+                    st.write(df_city['Platform'].value_counts())
+                    st.dataframe(df_city.head(), use_container_width=True)
+                
+                # Display summary for region data
+                if 'region' in geomap_results:
+                    st.write("**Region Data Summary:**")
+                    df_region = geomap_results['region']
+                    st.write(f"- Total rows: {df_region.shape[0]}")
+                    st.write(f"- Columns: {df_region.shape[1]}")
+                    st.write("- Platform distribution:")
+                    st.write(df_region['Platform'].value_counts())
+                    st.dataframe(df_region.head(), use_container_width=True)
+            else:
+                st.error("No geomap data found. Please check that your Google Trends data folder contains the expected CSV files.")
 
 # Save files to output folder section in sidebar
 with st.sidebar:
