@@ -57,9 +57,16 @@ import re
 from datetime import datetime
 from pathlib import Path
 import time
-# Import tkinter for file dialogs
-import tkinter as tk
-from tkinter import filedialog, messagebox
+import base64
+import io
+
+# Try to import openpyxl and handle missing dependency
+try:
+    import openpyxl
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    st.warning("⚠️ `openpyxl` is not installed. Please install it with `pip install openpyxl` for full Excel support.")
 
 # Fix for NLTK - check and download only if needed
 try:
@@ -76,58 +83,6 @@ try:
 except Exception:
     # Silently continue if NLTK issues occur
     pass
-
-class FileDialogManager:
-    """Manager for tkinter file dialogs"""
-    
-    def __init__(self):
-        self.root = None
-        self._init_root()
-    
-    def _init_root(self):
-        """Initialize the tkinter root window (hidden)"""
-        try:
-            if self.root is None:
-                self.root = tk.Tk()
-                self.root.withdraw()  # Hide the main window
-                self.root.attributes('-topmost', True)  # Make dialogs appear on top
-        except Exception as e:
-            st.error(f"Error initializing file dialog: {e}")
-    
-    def select_input_folder(self, initial_dir=None):
-        """Open folder selection dialog for input folder"""
-        try:
-            self._init_root()
-            folder_path = filedialog.askdirectory(
-                title="Select FPK Input Folder",
-                initialdir=initial_dir
-            )
-            return folder_path if folder_path else None
-        except Exception as e:
-            st.error(f"Error selecting input folder: {e}")
-            return None
-    
-    def select_output_folder(self, initial_dir=None):
-        """Open folder selection dialog for output folder"""
-        try:
-            self._init_root()
-            folder_path = filedialog.askdirectory(
-                title="Select Output Folder",
-                initialdir=initial_dir
-            )
-            return folder_path if folder_path else None
-        except Exception as e:
-            st.error(f"Error selecting output folder: {e}")
-            return None
-    
-    def cleanup(self):
-        """Clean up tkinter root window"""
-        try:
-            if self.root:
-                self.root.destroy()
-                self.root = None
-        except:
-            pass
 
 # Page configuration
 st.set_page_config(
@@ -171,6 +126,13 @@ st.markdown("""
     .metric-label {
         font-size: 1rem;
         color: #6c757d;
+    }
+    .upload-section {
+        background-color: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 2px dashed #dee2e6;
+        margin: 1rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -414,71 +376,183 @@ def save_file_paths(input_path, output_path):
     except:
         return False
 
+def get_file_download_link(df, filename, text):
+    """Generate a download link for a DataFrame"""
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+    return href
+
+def process_uploaded_files(uploaded_files, base_output_dir):
+    """Process uploaded Excel files"""
+    processed_files = []
+    created_folders = set()
+    
+    for uploaded_file in uploaded_files:
+        try:
+            # Extract date from filename or use current date
+            file_date = datetime.now()
+            filename_lower = uploaded_file.name.lower()
+            
+            # Try to extract date from filename
+            date_patterns = [
+                r'(\d{4}-\d{2}-\d{2})',
+                r'(\d{4}\.\d{2}\.\d{2})',
+                r'(\d{8})'
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, uploaded_file.name)
+                if match:
+                    date_str = match.group(1)
+                    try:
+                        if len(date_str) == 8:  # YYYYMMDD
+                            file_date = datetime.strptime(date_str, '%Y%m%d')
+                        elif '.' in date_str:  # YYYY.MM.DD
+                            file_date = datetime.strptime(date_str, '%Y.%m.%d')
+                        else:  # YYYY-MM-DD
+                            file_date = datetime.strptime(date_str, '%Y-%m-%d')
+                        break
+                    except ValueError:
+                        continue
+            
+            # Read the Excel file
+            excel_file = pd.ExcelFile(uploaded_file)
+            
+            for sheet_name in excel_file.sheet_names:
+                try:
+                    # Read the sheet
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
+                    
+                    if df.empty or len(df) < 2:
+                        processed_files.append({
+                            'status': 'skipped',
+                            'file_path': uploaded_file.name,
+                            'reason': 'Sheet is empty or has insufficient data',
+                            'sheet_name': sheet_name
+                        })
+                        continue
+                    
+                    # Delete first column if mostly empty
+                    if len(df.columns) > 0:
+                        first_col_empty_ratio = df.iloc[:, 0].isna().sum() / len(df)
+                        if first_col_empty_ratio > 0.8:
+                            df = df.drop(df.columns[0], axis=1)
+                    
+                    # Use row 5 as headers
+                    header_row = 4
+                    if header_row >= len(df):
+                        header_row = min(4, len(df) - 1) if len(df) > 1 else 0
+                    
+                    if len(df) > header_row:
+                        df.columns = df.iloc[header_row]
+                        if header_row + 1 < len(df):
+                            df = df.iloc[header_row + 1:].reset_index(drop=True)
+                        else:
+                            df = pd.DataFrame(columns=df.columns)
+                    
+                    df = df.dropna(how='all')
+                    
+                    if df.empty:
+                        processed_files.append({
+                            'status': 'skipped',
+                            'file_path': uploaded_file.name,
+                            'reason': 'No data rows after processing',
+                            'sheet_name': sheet_name
+                        })
+                        continue
+                    
+                    # Add Date column
+                    if 'Date' not in df.columns:
+                        df.insert(0, 'Date', file_date.strftime('%Y-%m-%d'))
+                    
+                    # Create output directory
+                    sanitized_sheet_name = sanitize_sheet_name(sheet_name)
+                    output_dir = os.path.join(base_output_dir, sanitized_sheet_name)
+                    os.makedirs(output_dir, exist_ok=True)
+                    created_folders.add(output_dir)
+                    
+                    # Save as CSV
+                    output_filename = f"{sanitized_sheet_name} {file_date.strftime('%Y%m%d')}.csv"
+                    output_path = os.path.join(output_dir, output_filename)
+                    
+                    df.to_csv(output_path, index=False)
+                    
+                    processed_files.append({
+                        'status': 'success',
+                        'file_path': output_path,
+                        'sheet_name': sheet_name,
+                        'rows_processed': len(df),
+                        'dataframe': df
+                    })
+                    
+                except Exception as sheet_error:
+                    processed_files.append({
+                        'status': 'error',
+                        'file_path': uploaded_file.name,
+                        'reason': f"Sheet processing error: {str(sheet_error)}",
+                        'sheet_name': sheet_name
+                    })
+                    continue
+                    
+        except Exception as e:
+            processed_files.append({
+                'status': 'error',
+                'file_path': uploaded_file.name,
+                'reason': str(e),
+                'sheet_name': 'unknown'
+            })
+    
+    return processed_files, created_folders
+
+def get_excel_sheet_names(file_path):
+    """Get sheet names from Excel file with proper error handling"""
+    try:
+        if not OPENPYXL_AVAILABLE:
+            return ["openpyxl not installed - install with: pip install openpyxl"]
+        
+        excel_file = pd.ExcelFile(file_path)
+        return excel_file.sheet_names
+    except Exception as e:
+        return [f"Error reading sheets: {str(e)}"]
+
 def main():
     """Main Streamlit application"""
     
     st.markdown('<div class="main-header">📊 FPK File Processor</div>', unsafe_allow_html=True)
     
-    # Initialize file dialog manager
-    if 'file_dialog' not in st.session_state:
-        st.session_state.file_dialog = FileDialogManager()
-    
     # Sidebar for folder selection
     st.sidebar.title("Folder Selection")
-    st.sidebar.markdown("Select input and output folders using file dialogs or manual entry")
+    st.sidebar.markdown("Select input and output folders using manual entry")
     
     # Load saved file paths
     saved_paths = load_file_paths()
     
-    # Folder selection with tkinter dialogs
+    # Folder selection with text inputs
     st.sidebar.markdown("### Input Folder")
-    col1, col2 = st.sidebar.columns([3, 1])
-    
-    with col1:
-        input_folder = st.text_input(
-            "FPK Folder Path:",
-            value=st.session_state.get('input_folder', saved_paths.get('input_folder', '')),
-            placeholder="C:/path/to/your/FPK/folder",
-            key="input_path",
-            label_visibility="collapsed"
-        )
-    
-    with col2:
-        if st.button("📁 Browse", key="browse_input", use_container_width=True):
-            selected_folder = st.session_state.file_dialog.select_input_folder(
-                initial_dir=st.session_state.get('input_folder', None)
-            )
-            if selected_folder:
-                st.session_state.input_folder = selected_folder
-                st.rerun()
+    input_folder = st.sidebar.text_input(
+        "FPK Folder Path:",
+        value=st.session_state.get('input_folder', saved_paths.get('input_folder', '')),
+        placeholder="C:/path/to/your/FPK/folder or ./data/input",
+        key="input_path",
+        label_visibility="collapsed"
+    )
     
     st.sidebar.markdown("### Output Folder")
-    col1, col2 = st.sidebar.columns([3, 1])
-    
-    with col1:
-        output_folder = st.text_input(
-            "Output Folder Path:",
-            value=st.session_state.get('output_folder', saved_paths.get('output_folder', '')),
-            placeholder="C:/path/to/output/folder",
-            key="output_path",
-            label_visibility="collapsed"
-        )
-    
-    with col2:
-        if st.button("📁 Browse", key="browse_output", use_container_width=True):
-            selected_folder = st.session_state.file_dialog.select_output_folder(
-                initial_dir=st.session_state.get('output_folder', None)
-            )
-            if selected_folder:
-                st.session_state.output_folder = selected_folder
-                st.rerun()
+    output_folder = st.sidebar.text_input(
+        "Output Folder Path:",
+        value=st.session_state.get('output_folder', saved_paths.get('output_folder', '')),
+        placeholder="C:/path/to/output/folder or ./data/output",
+        key="output_path",
+        label_visibility="collapsed"
+    )
     
     # Load File Path Button
     st.sidebar.markdown("### Path Management")
     col1, col2 = st.sidebar.columns(2)
     
     with col1:
-        if st.button("💾 Save Paths", use_container_width=True):
+        if st.sidebar.button("💾 Save Paths", width='stretch'):
             if input_folder and output_folder:
                 if save_file_paths(input_folder, output_folder):
                     st.sidebar.success("✅ Paths saved successfully!")
@@ -488,7 +562,7 @@ def main():
                 st.sidebar.warning("⚠️ Please enter both paths first")
     
     with col2:
-        if st.button("📂 Load Paths", use_container_width=True):
+        if st.sidebar.button("📂 Load Paths", width='stretch'):
             saved_paths = load_file_paths()
             if saved_paths:
                 st.session_state.input_folder = saved_paths.get('input_folder', '')
@@ -516,14 +590,65 @@ def main():
         st.sidebar.markdown("**Output:**")
         st.sidebar.markdown(f'<div class="path-display">{st.session_state.output_folder}</div>', unsafe_allow_html=True)
     
+    # File Upload Section
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📤 File Upload")
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Excel Files",
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        help="Upload Excel files directly for processing"
+    )
+    
     # Quick actions
     st.sidebar.markdown("### Quick Actions")
-    if st.sidebar.button("🔄 Refresh Folder Scan", use_container_width=True):
+    if st.sidebar.button("🔄 Refresh Folder Scan", width='stretch'):
         st.rerun()
     
-    # Main content area
+    # Main content area - File Upload Processing
+    if uploaded_files:
+        st.markdown("### 📤 Uploaded Files Processing")
+        st.markdown(f"**Files uploaded:** {len(uploaded_files)}")
+        
+        # Create a temporary output directory for uploaded files
+        upload_output_dir = os.path.join(st.session_state.output_folder if st.session_state.get('output_folder') else "./upload_output", "uploaded_files")
+        os.makedirs(upload_output_dir, exist_ok=True)
+        
+        if st.button("🚀 Process Uploaded Files", type="primary", width='stretch'):
+            with st.spinner("Processing uploaded files..."):
+                processed_files, created_folders = process_uploaded_files(uploaded_files, upload_output_dir)
+            
+            # Display results
+            success_count = len([f for f in processed_files if f['status'] == 'success'])
+            error_count = len([f for f in processed_files if f['status'] == 'error'])
+            skipped_count = len([f for f in processed_files if f['status'] == 'skipped'])
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("✅ Success", success_count)
+            with col2:
+                st.metric("❌ Errors", error_count)
+            with col3:
+                st.metric("⏭️ Skipped", skipped_count)
+            
+            # Show download links for successful files
+            if success_count > 0:
+                st.markdown("### 📥 Download Processed Files")
+                for result in processed_files:
+                    if result['status'] == 'success' and 'dataframe' in result:
+                        filename = os.path.basename(result['file_path'])
+                        st.markdown(get_file_download_link(result['dataframe'], filename, f"📥 Download {filename}"), unsafe_allow_html=True)
+            
+            # Show errors
+            if error_count > 0:
+                with st.expander("❌ Processing Errors"):
+                    for result in processed_files:
+                        if result['status'] == 'error':
+                            st.error(f"❌ {result['file_path']} - {result['sheet_name']}: {result['reason']}")
+    
+    # Main content area - Folder Processing
     if not st.session_state.get('input_folder'):
-        st.info("👈 Please select an input folder using the file browser or enter the path manually")
+        st.info("👈 Please enter an input folder path or upload files directly")
         st.markdown("""
         ### Expected Folder Structure:
         ```
@@ -537,21 +662,30 @@ def main():
         ```
         
         ### How to use:
-        1. Click **📁 Browse** next to "Input Folder" to select your FPK folder
-        2. Click **📁 Browse** next to "Output Folder" to select where to save processed files
-        3. Click **💾 Save Paths** to remember your selections
-        4. Click **🚀 Start Processing** to begin conversion
+        1. **Option 1 - Folder Processing:**
+           - Enter input folder path containing date-named subfolders
+           - Enter output folder path for processed files
+           - Click **🚀 Start Processing** to begin conversion
+        
+        2. **Option 2 - Direct Upload:**
+           - Use the file uploader in the sidebar to upload Excel files directly
+           - Files will be processed immediately
+           - Download links will be provided for processed CSV files
+        
+        3. **Save/Load Paths:**
+           - Use **💾 Save Paths** to remember your folder selections
+           - Use **📂 Load Paths** to reload previously saved paths
         """)
         return
     
     # Check if input folder exists
     if not os.path.exists(st.session_state.input_folder):
         st.error(f"❌ Input folder does not exist: {st.session_state.input_folder}")
-        st.info("Please select a valid folder using the file browser")
+        st.info("Please enter a valid folder path or use file upload instead")
         return
     
     if not st.session_state.get('output_folder'):
-        st.info("👈 Please select an output folder using the file browser or enter the path manually")
+        st.info("👈 Please enter an output folder path")
         return
     
     # Scan folder structure
@@ -565,11 +699,15 @@ def main():
         - Root folder containing date-named subfolders
         - Date format: `YYYY-MM-DD`, `YYYY.MM.DD`, `YYYYMMDD`, etc.
         - Each date folder should contain Excel files (.xlsx or .xls)
+        
+        ### Alternative:
+        Use the file upload feature in the sidebar to process files directly
         """)
         return
     
     if scan_results['total_files'] == 0:
         st.warning("⚠️ No Excel files found in the FPK structure!")
+        st.info("Try using the file upload feature instead")
         return
     
     # Display folder statistics
@@ -615,7 +753,7 @@ def main():
             }
             for folder in scan_results['date_folders']
         ])
-        st.dataframe(date_df, use_container_width=True, hide_index=True)
+        st.dataframe(date_df, width='stretch', hide_index=True)
     else:
         st.warning("No valid date folders found!")
     
@@ -624,8 +762,7 @@ def main():
         st.markdown("### 📋 Sheet Names Found")
         sample_file = scan_results['excel_files'][0]
         try:
-            excel_file = pd.ExcelFile(sample_file['path'])
-            sheet_names = excel_file.sheet_names
+            sheet_names = get_excel_sheet_names(sample_file['path'])
             
             st.write(f"**Sheets in** `{os.path.basename(sample_file['path'])}`:")
             for i, sheet_name in enumerate(sheet_names, 1):
@@ -646,42 +783,10 @@ def main():
     
     with col2:
         debug_mode = st.checkbox("Debug mode (show sheet structure)", value=False)
-        create_sample_structure = st.checkbox("Create sample structure for testing", value=False)
-    
-    # Create sample structure if requested
-    if create_sample_structure:
-        if st.button("Create Sample FPK Structure"):
-            sample_dir = os.path.join(st.session_state.input_folder, "sample_fpk")
-            os.makedirs(sample_dir, exist_ok=True)
-            
-            sample_dates = ['2024-01-15', '2024-01-16', '2024-01-17']
-            sample_data = {
-                'Unnamed: 0': ['', '', '', '', 'Row0'],
-                'Col1': ['', '', '', 'Header1', 'Data1'],
-                'Col2': ['', '', '', 'Header2', 'Data2'],
-                'Col3': ['', '', '', 'Header3', 'Data3']
-            }
-            
-            for date_str in sample_dates:
-                date_dir = os.path.join(sample_dir, date_str)
-                os.makedirs(date_dir, exist_ok=True)
-                
-                df = pd.DataFrame(sample_data)
-                file_path = os.path.join(date_dir, f"sample_data_{date_str}.xlsx")
-                
-                # Create Excel file with multiple sheets
-                with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-                    df.to_excel(writer, sheet_name='Sheet1', index=False)
-                    df.to_excel(writer, sheet_name='Data', index=False)
-                    df.to_excel(writer, sheet_name='Report', index=False)
-            
-            st.success(f"✅ Sample structure created at: {sample_dir}")
-            st.session_state.input_folder = sample_dir
-            st.rerun()
     
     # Process button
     st.markdown("---")
-    if st.button("🚀 Start Processing", type="primary", use_container_width=True):
+    if st.button("🚀 Start Processing", type="primary", width='stretch'):
         if not os.path.exists(st.session_state.output_folder):
             os.makedirs(st.session_state.output_folder, exist_ok=True)
             st.success(f"✅ Created output directory: {st.session_state.output_folder}")
@@ -820,7 +925,6 @@ if __name__ == "__main__":
     
     try:
         main()
-    finally:
-        # Clean up tkinter resources
-        if 'file_dialog' in st.session_state:
-            st.session_state.file_dialog.cleanup()
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.info("Please refresh the page and try again")
