@@ -4,5 +4,4 @@ nltk
 numpy
 tokenizers
 torch
-tkinter
 transformers
